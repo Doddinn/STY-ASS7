@@ -82,7 +82,7 @@ int mapPage(uint32_t virtualBase, uint32_t physicalBase, ReadWrite accessMode,
         _cr3->entries[pd_index] = new_pde;
     } else{
         // page table exit
-        pt = (PageTable *)(uintptr_t)(pde & PAGE_TABLE_ADDRESS_MASK);  // fixed FRAME_MASK to PAGE_TABLE_ADDRESS_MASK
+        pt = (PageTable *)(uintptr_t)(pde & PAGE_DIRECTORY_ADDRESS_MASK);  // fixed mask: use PAGE_DIRECTORY_ADDRESS_MASK instead of PAGE_TABLE_ADDRESS_MASK
     }
 
     // build the new page table entry
@@ -99,8 +99,7 @@ int mapPage(uint32_t virtualBase, uint32_t physicalBase, ReadWrite accessMode,
     return 0;
 }
 
-
-#define TRANSLATION_ERROR 0xFFFFFFFF
+#define TRANSLATION_ERROR INVALID_ADDRESS
 // return 0xFFFFFFFF on error, physical frame number otherweise.
 uint32_t translatePageTable(uint32_t virtualAddress, ReadWrite accessMode,
     PrivilegeLevel privileges)
@@ -120,7 +119,7 @@ uint32_t translatePageTable(uint32_t virtualAddress, ReadWrite accessMode,
     }
 
     // get the page table pointer
-    PageTable *pt = (PageTable *)(uintptr_t)(pde & PAGE_TABLE_ADDRESS_MASK);  // fixed type and mask
+    PageTable *pt = (PageTable *)(uintptr_t)(pde & PAGE_DIRECTORY_ADDRESS_MASK);  // fixed type and mask extraction
     uint32_t pte = pt->entries[pt_index];
 
     // Check that the page table entry is present
@@ -128,8 +127,8 @@ uint32_t translatePageTable(uint32_t virtualAddress, ReadWrite accessMode,
         return TRANSLATION_ERROR;
     }
 
-    // if a write access is requested the bit must be set
-    if (accessMode == ACCESS_WRITE && !(pte & PAGE_READWRITE_MASK)) {
+    // if a write access is requested the bit must be set (only enforce for user mode)
+    if (accessMode == ACCESS_WRITE && privileges == USER_MODE && !(pte & PAGE_READWRITE_MASK)) {
         return TRANSLATION_ERROR;
     }
     // if user mode is requested the user/kernel bit must be set
@@ -143,15 +142,44 @@ uint32_t translatePageTable(uint32_t virtualAddress, ReadWrite accessMode,
     // physical frame base
     uint32_t phys_base = pte & PAGE_TABLE_ADDRESS_MASK;  // fixed mask usage
     return phys_base | offset;
-
-    return TRANSLATION_ERROR;
 }
 
 // return -1 on error, 0 on success
 int unmapPage(uint32_t virtualBase) {
+    // Ensure the virtual base address is page-aligned.
     if (_getOffset(virtualBase) != 0) {
         return -1;
     }
 
-    return -1;
+    assert(_cr3 != NULL);
+
+    // Get indices for the page directory and page table.
+    uint32_t pd_index = _getPageDirectoryIndex(virtualBase);
+    uint32_t pt_index = _getPageTableIndex(virtualBase);
+
+    // Retrieve the page directory entry.
+    uint64_t pde = _cr3->entries[pd_index];
+    if (!(pde & PAGE_PRESENT_MASK)) {
+        return -1;
+    }
+
+    // Get the pointer to the page table.
+    PageTable *pt = (PageTable *)(uintptr_t)(pde & PAGE_DIRECTORY_ADDRESS_MASK);
+
+    // Mark the page table entry as invalid by clearing the present bit.
+    pt->entries[pt_index] &= ~PAGE_PRESENT_MASK;
+
+    // Optionally, if all entries in the PTE are marked as not present, free the page table page.
+    int isEmpty = 1;
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
+        if (pt->entries[i] & PAGE_PRESENT_MASK) {
+            isEmpty = 0;
+            break;
+        }
+    }
+    if (isEmpty) {
+        free(pt);
+        _cr3->entries[pd_index] &= ~PAGE_PRESENT_MASK;
+    }
+    return 0;
 }
